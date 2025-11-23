@@ -2,18 +2,35 @@
 RAG Policy Assistant - FastAPI Application
 
 A Retrieval-Augmented Generation application for querying policy documents
-using Azure OpenAI and Azure AI Search.
+using Azure OpenAI, Azure AI Search, and Azure Blob Storage.
 """
 
 import os
 import logging
-from typing import Optional
+import uuid
+from typing import Optional, List
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI, HTTPException, UploadFile, File
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
+
+import fitz  # PyMuPDF
+from openai import AzureOpenAI
+from azure.search.documents import SearchClient
+from azure.search.documents.indexes import SearchIndexClient
+from azure.search.documents.indexes.models import (
+    SearchIndex,
+    SimpleField,
+    SearchableField,
+    SearchFieldDataType,
+    VectorSearch,
+    VectorSearchProfile,
+    HnswAlgorithmConfiguration
+)
+from azure.search.documents.models import VectorizedQuery
+from azure.storage.blob import BlobServiceClient
+from azure.core.credentials import AzureKeyCredential
 
 # Load environment variables
 load_dotenv()
@@ -26,30 +43,24 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-
-# Pydantic models for request/response validation
+# Pydantic models
 class HealthResponse(BaseModel):
-    """Health check response model"""
     status: str = Field(..., description="Application status")
     message: str = Field(..., description="Status message")
 
+class UploadResponse(BaseModel):
+    message: str
+    document_id: str
 
-class QueryRequest(BaseModel):
-    """Query request model"""
-    query: str = Field(..., description="User query", min_length=1)
-    max_results: Optional[int] = Field(5, description="Maximum number of results", ge=1, le=20)
+class AskRequest(BaseModel):
+    question: str = Field(..., min_length=1)
 
-
-class QueryResponse(BaseModel):
-    """Query response model"""
-    query: str = Field(..., description="Original query")
-    answer: str = Field(..., description="Generated answer")
-    sources: list = Field(default_factory=list, description="Source documents")
-
+class AskResponse(BaseModel):
+    answer: str
+    sources: List[str]
 
 # Application configuration
 class Config:
-    """Application configuration from environment variables"""
     def __init__(self):
         self.aoai_endpoint = os.getenv("AOAI_ENDPOINT")
         self.aoai_key = os.getenv("AOAI_KEY")
@@ -57,123 +68,175 @@ class Config:
         self.embed_model = os.getenv("EMBED_MODEL", "text-embedding-3-large")
         self.ai_search_endpoint = os.getenv("AI_SEARCH_ENDPOINT")
         self.ai_search_key = os.getenv("AI_SEARCH_KEY")
-        
+        self.azure_storage_connection_string = os.getenv("AZURE_STORAGE_CONNECTION_STRING")
+        self.index_name = "policy-documents"
+        self.container_name = "policy-pdfs"
+
     def validate(self):
-        """Validate required configuration"""
-        required_vars = [
-            "aoai_endpoint",
-            "aoai_key",
-            "ai_search_endpoint",
-            "ai_search_key"
-        ]
-        missing = [var for var in required_vars if not getattr(self, var)]
-        if missing:
-            logger.warning(f"Missing configuration: {', '.join(missing)}")
-            return False
-        return True
+        required = [self.aoai_endpoint, self.aoai_key, self.ai_search_endpoint, self.ai_search_key, self.azure_storage_connection_string]
+        return all(required)
 
-
-# Global configuration instance
+# Global config
 config = Config()
 
+# Global clients
+aoai_client = None
+search_client = None
+blob_service_client = None
+
+def create_search_index():
+    """Create the search index if it doesn't exist"""
+    index_client = SearchIndexClient(endpoint=config.ai_search_endpoint, credential=AzureKeyCredential(config.ai_search_key))
+    
+    fields = [
+        SimpleField(name="id", type=SearchFieldDataType.String, key=True),
+        SimpleField(name="document_id", type=SearchFieldDataType.String),
+        SimpleField(name="chunk_id", type=SearchFieldDataType.Int32),
+        SearchableField(name="text", type=SearchFieldDataType.String),
+        SearchField(
+            name="embedding",
+            type=SearchFieldDataType.Collection(SearchFieldDataType.Single),
+            searchable=True,
+            vector_search_dimensions=3072,  # for text-embedding-3-large
+            vector_search_profile_name="my-vector-profile"
+        )
+    ]
+    
+    vector_search = VectorSearch(
+        profiles=[VectorSearchProfile(name="my-vector-profile", algorithm_configuration_name="my-algorithms-config")],
+        algorithms=[HnswAlgorithmConfiguration(name="my-algorithms-config")]
+    )
+    
+    index = SearchIndex(name=config.index_name, fields=fields, vector_search=vector_search)
+    
+    try:
+        index_client.create_index(index)
+        logger.info(f"Created search index: {config.index_name}")
+    except Exception as e:
+        if "already exists" in str(e).lower():
+            logger.info(f"Search index {config.index_name} already exists")
+        else:
+            logger.error(f"Error creating search index: {e}")
+            raise
+
+def extract_text_from_pdf(file_bytes: bytes) -> str:
+    """Extract text from PDF bytes"""
+    doc = fitz.open(stream=file_bytes, filetype="pdf")
+    text = ""
+    for page in doc:
+        text += page.get_text()
+    doc.close()
+    return text
+
+def chunk_text(text: str, chunk_size: int = 1000, overlap: int = 200) -> List[str]:
+    """Chunk text into smaller pieces"""
+    chunks = []
+    start = 0
+    while start < len(text):
+        end = start + chunk_size
+        chunk = text[start:end]
+        chunks.append(chunk)
+        start = end - overlap
+        if start >= len(text):
+            break
+    return chunks
+
+def generate_embedding(text: str) -> List[float]:
+    """Generate embedding for text"""
+    response = aoai_client.embeddings.create(input=text, model=config.embed_model)
+    return response.data[0].embedding
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Application lifespan manager"""
-    logger.info("Starting RAG Policy Assistant application")
-    config.validate()
+    global aoai_client, search_client, blob_service_client
+    logger.info("Starting RAG Policy Assistant")
+    if not config.validate():
+        logger.error("Configuration incomplete")
+        raise RuntimeError("Configuration incomplete")
+    
+    aoai_client = AzureOpenAI(api_key=config.aoai_key, api_version="2024-02-01", azure_endpoint=config.aoai_endpoint)
+    search_client = SearchClient(endpoint=config.ai_search_endpoint, index_name=config.index_name, credential=AzureKeyCredential(config.ai_search_key))
+    blob_service_client = BlobServiceClient.from_connection_string(config.azure_storage_connection_string)
+    
+    create_search_index()
+    
+    # Create blob container if not exists
+    try:
+        blob_service_client.create_container(config.container_name)
+    except:
+        pass
+    
     yield
-    logger.info("Shutting down RAG Policy Assistant application")
+    logger.info("Shutting down")
 
-
-# Initialize FastAPI application
-app = FastAPI(
-    title="RAG Policy Assistant",
-    description="A Retrieval-Augmented Generation application for querying policy documents",
-    version="1.0.0",
-    lifespan=lifespan
-)
-
+app = FastAPI(title="RAG Policy Assistant", lifespan=lifespan)
 
 @app.get("/", response_model=HealthResponse)
 async def health_check():
-    """
-    Health check endpoint
-    
-    Returns the application status and a welcome message.
-    """
-    return HealthResponse(
-        status="healthy",
-        message="RAG Policy Assistant is running"
-    )
+    return HealthResponse(status="healthy", message="RAG Policy Assistant is running")
 
-
-@app.post("/query", response_model=QueryResponse)
-async def query_policies(request: QueryRequest):
-    """
-    Query policy documents
-    
-    Process a user query and return relevant information from policy documents
-    using RAG (Retrieval-Augmented Generation).
-    
-    Args:
-        request: Query request containing the user's question
-        
-    Returns:
-        QueryResponse with the generated answer and source documents
-        
-    Raises:
-        HTTPException: If the query processing fails
-    """
+@app.post("/upload-policy", response_model=UploadResponse)
+async def upload_policy(file: UploadFile = File(...)):
     try:
-        logger.info(f"Processing query: {request.query}")
+        if not file.filename.endswith('.pdf'):
+            raise HTTPException(400, "Only PDF files are supported")
         
-        # Validate configuration
-        if not config.validate():
-            raise HTTPException(
-                status_code=500,
-                detail="Application configuration is incomplete. Please check environment variables."
-            )
+        file_bytes = await file.read()
+        text = extract_text_from_pdf(file_bytes)
         
-        # TODO: Implement RAG logic
-        # 1. Generate embeddings for the query
-        # 2. Search Azure AI Search for relevant documents
-        # 3. Generate answer using Azure OpenAI with retrieved context
+        document_id = str(uuid.uuid4())
         
-        # Placeholder response
-        return QueryResponse(
-            query=request.query,
-            answer="This is a placeholder response. RAG implementation is pending.",
-            sources=[]
-        )
+        # Upload PDF to blob
+        blob_client = blob_service_client.get_blob_client(container=config.container_name, blob=f"{document_id}.pdf")
+        blob_client.upload_blob(file_bytes, overwrite=True)
         
-    except HTTPException:
-        raise
+        # Chunk and index
+        chunks = chunk_text(text)
+        documents = []
+        for i, chunk in enumerate(chunks):
+            embedding = generate_embedding(chunk)
+            documents.append({
+                "id": f"{document_id}_{i}",
+                "document_id": document_id,
+                "chunk_id": i,
+                "text": chunk,
+                "embedding": embedding
+            })
+        
+        search_client.upload_documents(documents)
+        
+        return UploadResponse(message="Policy document uploaded and indexed", document_id=document_id)
     except Exception as e:
-        logger.error(f"Error processing query: {str(e)}", exc_info=True)
-        raise HTTPException(
-            status_code=500,
-            detail=f"An error occurred while processing your query: {str(e)}"
+        logger.error(f"Upload error: {e}")
+        raise HTTPException(500, str(e))
+
+@app.post("/ask-policy", response_model=AskResponse)
+async def ask_policy(request: AskRequest):
+    try:
+        query_embedding = generate_embedding(request.question)
+        
+        vector_query = VectorizedQuery(vector=query_embedding, k_nearest_neighbors=5, fields="embedding")
+        results = search_client.search(search_text="", vector_queries=[vector_query])
+        
+        context = ""
+        sources = []
+        for result in results:
+            context += result["text"] + "\n"
+            sources.append(result["document_id"])
+        
+        prompt = f"Context:\n{context}\n\nQuestion: {request.question}\n\nAnswer based on the context:"
+        
+        response = aoai_client.chat.completions.create(
+            model=config.chat_model,
+            messages=[{"role": "user", "content": prompt}]
         )
-
-
-@app.get("/config")
-async def get_config():
-    """
-    Get application configuration status
-    
-    Returns information about the current configuration without exposing secrets.
-    """
-    return {
-        "aoai_endpoint_configured": bool(config.aoai_endpoint),
-        "aoai_key_configured": bool(config.aoai_key),
-        "chat_model": config.chat_model,
-        "embed_model": config.embed_model,
-        "ai_search_endpoint_configured": bool(config.ai_search_endpoint),
-        "ai_search_key_configured": bool(config.ai_search_key),
-        "configuration_valid": config.validate()
-    }
-
+        
+        answer = response.choices[0].message.content
+        
+        return AskResponse(answer=answer, sources=list(set(sources)))
+    except Exception as e:
+        logger.error(f"Query error: {e}")
+        raise HTTPException(500, str(e))
 
 if __name__ == "__main__":
     import uvicorn

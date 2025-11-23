@@ -1,13 +1,14 @@
 # RAG Policy Assistant
 
-A FastAPI-based Retrieval-Augmented Generation (RAG) application for querying policy documents using Azure OpenAI and Azure AI Search.
+A FastAPI-based Retrieval-Augmented Generation (RAG) application for querying policy documents using Azure OpenAI, Azure AI Search, and Azure Blob Storage.
 
 ## Features
 
 - FastAPI web application with RESTful API endpoints
+- PDF document upload and text extraction
 - Integration with Azure OpenAI for chat and embeddings
-- Azure AI Search for document retrieval
-- PDF document processing with PyMuPDF
+- Azure AI Search for vector-based document retrieval
+- Azure Blob Storage for document persistence
 - Environment-based configuration
 - Comprehensive test suite
 
@@ -16,7 +17,7 @@ A FastAPI-based Retrieval-Augmented Generation (RAG) application for querying po
 - Python 3.8 or higher
 - Azure OpenAI account with API access
 - Azure AI Search service
-- Azure Storage account (optional, for document storage)
+- Azure Storage account for blob storage
 
 ## Installation
 
@@ -49,10 +50,11 @@ Set the following environment variables in your `.env` file:
 
 - `AOAI_ENDPOINT`: Azure OpenAI endpoint URL
 - `AOAI_KEY`: Azure OpenAI API key
-- `CHAT_MODEL`: Chat model deployment name (e.g., gpt-4o-mini)
-- `EMBED_MODEL`: Embedding model deployment name (e.g., text-embedding-3-large)
+- `CHAT_MODEL`: Chat model deployment name (default: gpt-4o-mini)
+- `EMBED_MODEL`: Embedding model deployment name (default: text-embedding-3-large)
 - `AI_SEARCH_ENDPOINT`: Azure AI Search endpoint URL
 - `AI_SEARCH_KEY`: Azure AI Search API key
+- `AZURE_STORAGE_CONNECTION_STRING`: Azure Storage connection string
 - `LOG_LEVEL`: Logging level (INFO, DEBUG, WARNING, ERROR)
 
 ## Running the Application
@@ -96,8 +98,49 @@ pytest --cov=. --cov-report=html
 ## API Endpoints
 
 - `GET /`: Health check endpoint
+- `POST /upload-policy`: Upload and index a PDF policy document
+- `POST /ask-policy`: Ask questions about policy documents using RAG
 - `GET /docs`: Interactive API documentation (Swagger UI)
 - `GET /redoc`: Alternative API documentation (ReDoc)
+
+### Upload Policy Document
+
+Upload a PDF file to be processed, stored, and indexed for querying.
+
+**Endpoint:** `POST /upload-policy`
+
+**Request:**
+- Content-Type: multipart/form-data
+- Body: file (PDF file)
+
+**Response:**
+```json
+{
+  "message": "Policy document uploaded and indexed",
+  "document_id": "uuid"
+}
+```
+
+### Ask Policy Question
+
+Query the indexed policy documents using RAG.
+
+**Endpoint:** `POST /ask-policy`
+
+**Request:**
+```json
+{
+  "question": "What is the policy on remote work?"
+}
+```
+
+**Response:**
+```json
+{
+  "answer": "According to the policy...",
+  "sources": ["doc1", "doc2"]
+}
+```
 
 ## Development
 
@@ -105,7 +148,9 @@ This project uses:
 - **FastAPI** for the web framework
 - **Uvicorn** as the ASGI server
 - **Azure OpenAI** for LLM capabilities
-- **Azure AI Search** for document retrieval
+- **Azure AI Search** for vector search
+- **Azure Blob Storage** for document storage
+- **PyMuPDF** for PDF text extraction
 - **Pydantic** for data validation
 - **pytest** for testing
 
