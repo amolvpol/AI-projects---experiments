@@ -96,6 +96,8 @@ pytest --cov=. --cov-report=html
 ## API Endpoints
 
 - `GET /`: Health check endpoint
+- `POST /query`: Query policy documents using RAG
+- `GET /config`: Get application configuration status
 - `GET /docs`: Interactive API documentation (Swagger UI)
 - `GET /redoc`: Alternative API documentation (ReDoc)
 
