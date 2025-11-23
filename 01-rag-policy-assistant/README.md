@@ -98,8 +98,13 @@ pytest --cov=. --cov-report=html
 ## API Endpoints
 
 - `GET /`: Health check endpoint
+<<<<<<< HEAD
 - `POST /upload-policy`: Upload and index a PDF policy document
 - `POST /ask-policy`: Ask questions about policy documents using RAG
+=======
+- `POST /query`: Query policy documents using RAG
+- `GET /config`: Get application configuration status
+>>>>>>> 1fb6c7b69250ea7d387b6dc6725b996864fbbdf5
 - `GET /docs`: Interactive API documentation (Swagger UI)
 - `GET /redoc`: Alternative API documentation (ReDoc)
 
