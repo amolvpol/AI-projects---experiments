@@ -184,7 +184,7 @@ class SearchService:
                     vector_queries=[{
                         "vector": query_vector,
                         "k_nearest_neighbors": top,
-                        "fields": "content_vector"
+                        "field": "content_vector"
                     }],
                     top=top,
                     select=["id", "content", "title", "source"]

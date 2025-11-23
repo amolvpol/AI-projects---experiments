@@ -7,7 +7,7 @@ import tempfile
 from pathlib import Path
 
 # Test document processing functions
-from document_processor import chunk_text, generate_document_id
+from document_processor import chunk_text, generate_document_id, sanitize_filename
 
 
 def test_chunk_text_small():
@@ -50,10 +50,40 @@ def test_generate_document_id():
     # Different inputs should generate different IDs
     assert doc_id1 != doc_id3
     
-    # ID should be a valid hex string
-    assert len(doc_id1) == 32  # MD5 hash length
+    # ID should be a valid hex string (SHA256)
+    assert len(doc_id1) == 64  # SHA256 hash length
     
     print("✓ test_generate_document_id passed")
+
+
+def test_sanitize_filename():
+    """Test filename sanitization."""
+    # Test path traversal prevention - basename removes path components
+    assert sanitize_filename("../../../etc/passwd") == "passwd"
+    
+    # Test normal filename
+    assert sanitize_filename("document.pdf") == "document.pdf"
+    
+    # Test filename with special characters
+    result = sanitize_filename("my@file#name.txt")
+    assert result == "my_file_name.txt"
+    
+    # Test hidden file prevention
+    result = sanitize_filename(".hidden")
+    assert not result.startswith('.')
+    
+    # Test empty filename
+    result = sanitize_filename("")
+    assert result == "unnamed_file"
+    
+    # Test path components are stripped (Unix paths)
+    assert sanitize_filename("/path/to/file.txt") == "file.txt"
+    
+    # Test that basename handles the filename
+    result = sanitize_filename("some/path/document.pdf")
+    assert "document.pdf" in result
+    
+    print("✓ test_sanitize_filename passed")
 
 
 def test_txt_file_processing():
@@ -123,6 +153,7 @@ def run_all_tests():
         test_chunk_text_small,
         test_chunk_text_large,
         test_generate_document_id,
+        test_sanitize_filename,
         test_txt_file_processing,
         test_config_loading,
     ]

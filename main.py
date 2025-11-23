@@ -6,6 +6,7 @@ import os
 import logging
 from pathlib import Path
 from typing import List
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from pydantic import BaseModel
 import uvicorn
@@ -13,7 +14,7 @@ import uvicorn
 from config import settings
 from openai_client import openai_service
 from search import search_service
-from document_processor import process_document
+from document_processor import process_document, sanitize_filename
 
 # Configure logging
 logging.basicConfig(
@@ -22,11 +23,39 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Initialize FastAPI app
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Initialize and cleanup application resources."""
+    # Startup
+    logger.info("Starting RAG Policy Assistant...")
+    
+    # Create upload directory if it doesn't exist
+    upload_dir = Path(settings.upload_dir)
+    upload_dir.mkdir(exist_ok=True)
+    logger.info(f"Upload directory: {upload_dir}")
+    
+    # Create search index if it doesn't exist
+    try:
+        search_service.create_index()
+        logger.info("Search index initialized")
+    except Exception as e:
+        logger.warning(f"Could not initialize search index: {e}")
+    
+    logger.info("RAG Policy Assistant started successfully")
+    
+    yield
+    
+    # Shutdown
+    logger.info("Shutting down RAG Policy Assistant...")
+
+
+# Initialize FastAPI app with lifespan
 app = FastAPI(
     title="RAG Policy Assistant",
     description="A FastAPI app that answers questions grounded in enterprise documents using Azure OpenAI and Azure AI Search.",
-    version="1.0.0"
+    version="1.0.0",
+    lifespan=lifespan
 )
 
 
@@ -46,26 +75,6 @@ class IngestResponse(BaseModel):
     message: str
     filename: str
     chunks_indexed: int
-
-
-@app.on_event("startup")
-async def startup_event():
-    """Initialize the application on startup."""
-    logger.info("Starting RAG Policy Assistant...")
-    
-    # Create upload directory if it doesn't exist
-    upload_dir = Path(settings.upload_dir)
-    upload_dir.mkdir(exist_ok=True)
-    logger.info(f"Upload directory: {upload_dir}")
-    
-    # Create search index if it doesn't exist
-    try:
-        search_service.create_index()
-        logger.info("Search index initialized")
-    except Exception as e:
-        logger.warning(f"Could not initialize search index: {e}")
-    
-    logger.info("RAG Policy Assistant started successfully")
 
 
 @app.get("/")
@@ -146,17 +155,20 @@ async def ingest_document(file: UploadFile = File(...)):
         if not filename:
             raise HTTPException(status_code=400, detail="No filename provided")
         
-        ext = os.path.splitext(filename)[1].lower()
+        # Sanitize filename to prevent path traversal
+        safe_filename = sanitize_filename(filename)
+        
+        ext = os.path.splitext(safe_filename)[1].lower()
         if ext not in ['.pdf', '.txt']:
             raise HTTPException(
                 status_code=400,
                 detail=f"Unsupported file format: {ext}. Only PDF and TXT files are supported."
             )
         
-        logger.info(f"Ingesting document: {filename}")
+        logger.info(f"Ingesting document: {safe_filename}")
         
         # Save uploaded file
-        upload_path = Path(settings.upload_dir) / filename
+        upload_path = Path(settings.upload_dir) / safe_filename
         with open(upload_path, "wb") as f:
             content = await file.read()
             f.write(content)
@@ -164,7 +176,7 @@ async def ingest_document(file: UploadFile = File(...)):
         # Process document into chunks
         document_chunks = process_document(
             file_path=str(upload_path),
-            filename=filename
+            filename=safe_filename
         )
         
         # Generate embeddings for all chunks
@@ -178,11 +190,11 @@ async def ingest_document(file: UploadFile = File(...)):
         # Index documents in Azure AI Search
         search_service.index_documents(document_chunks)
         
-        logger.info(f"Successfully indexed {len(document_chunks)} chunks from {filename}")
+        logger.info(f"Successfully indexed {len(document_chunks)} chunks from {safe_filename}")
         
         return IngestResponse(
             message="Document ingested and indexed successfully",
-            filename=filename,
+            filename=safe_filename,
             chunks_indexed=len(document_chunks)
         )
     

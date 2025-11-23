@@ -106,8 +106,43 @@ def generate_document_id(filename: str, chunk_index: int) -> str:
         Unique document ID
     """
     content = f"{filename}_{chunk_index}"
-    doc_id = hashlib.md5(content.encode()).hexdigest()
+    doc_id = hashlib.sha256(content.encode()).hexdigest()
     return doc_id
+
+
+def sanitize_filename(filename: str) -> str:
+    """
+    Sanitize a filename to prevent path traversal attacks.
+    
+    Args:
+        filename: Original filename
+        
+    Returns:
+        Sanitized filename safe for file system operations
+    """
+    # Remove any path components (keep only the filename)
+    filename = os.path.basename(filename)
+    
+    # Remove or replace potentially dangerous characters
+    # Keep alphanumeric, dots, hyphens, and underscores
+    safe_chars = []
+    for char in filename:
+        if char.isalnum() or char in '.-_ ':
+            safe_chars.append(char)
+        else:
+            safe_chars.append('_')
+    
+    sanitized = ''.join(safe_chars).strip()
+    
+    # Ensure filename is not empty after sanitization
+    if not sanitized or sanitized == '.':
+        sanitized = 'unnamed_file'
+    
+    # Prevent hidden files
+    if sanitized.startswith('.'):
+        sanitized = '_' + sanitized[1:]
+    
+    return sanitized
 
 
 def process_document(
@@ -128,6 +163,9 @@ def process_document(
     Returns:
         List of document dictionaries ready for indexing (without embeddings)
     """
+    # Sanitize filename
+    safe_filename = sanitize_filename(filename)
+    
     # Extract text based on file extension
     ext = os.path.splitext(filename)[1].lower()
     
@@ -150,13 +188,13 @@ def process_document(
     documents = []
     for i, chunk in enumerate(chunks):
         doc = {
-            "id": generate_document_id(filename, i),
+            "id": generate_document_id(safe_filename, i),
             "content": chunk,
-            "title": filename,
-            "source": filename,
+            "title": safe_filename,
+            "source": safe_filename,
             "chunk_index": i
         }
         documents.append(doc)
     
-    logger.info(f"Processed document '{filename}' into {len(documents)} chunks")
+    logger.info(f"Processed document '{safe_filename}' into {len(documents)} chunks")
     return documents
