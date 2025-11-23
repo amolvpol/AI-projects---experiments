@@ -30,25 +30,43 @@ class SearchService:
         """Initialize the Search Service with DefaultAzureCredential or API key."""
         self.endpoint = settings.azure_search_endpoint
         self.index_name = settings.azure_search_index_name
-        
-        # Try DefaultAzureCredential first, fallback to API key
-        if settings.azure_search_api_key:
-            logger.info("Using API key authentication for Azure AI Search")
-            self.credential = AzureKeyCredential(settings.azure_search_api_key)
-        else:
-            logger.info("Using DefaultAzureCredential for Azure AI Search")
-            self.credential = DefaultAzureCredential()
-        
-        self.index_client = SearchIndexClient(
-            endpoint=self.endpoint,
-            credential=self.credential
-        )
-        
-        self.search_client = SearchClient(
-            endpoint=self.endpoint,
-            index_name=self.index_name,
-            credential=self.credential
-        )
+        self._credential = None
+        self._index_client = None
+        self._search_client = None
+    
+    @property
+    def credential(self):
+        """Lazy initialization of Azure credential."""
+        if self._credential is None:
+            # Try DefaultAzureCredential first, fallback to API key
+            if settings.azure_search_api_key:
+                logger.info("Using API key authentication for Azure AI Search")
+                self._credential = AzureKeyCredential(settings.azure_search_api_key)
+            else:
+                logger.info("Using DefaultAzureCredential for Azure AI Search")
+                self._credential = DefaultAzureCredential()
+        return self._credential
+    
+    @property
+    def index_client(self):
+        """Lazy initialization of SearchIndexClient."""
+        if self._index_client is None:
+            self._index_client = SearchIndexClient(
+                endpoint=self.endpoint,
+                credential=self.credential
+            )
+        return self._index_client
+    
+    @property
+    def search_client(self):
+        """Lazy initialization of SearchClient."""
+        if self._search_client is None:
+            self._search_client = SearchClient(
+                endpoint=self.endpoint,
+                index_name=self.index_name,
+                credential=self.credential
+            )
+        return self._search_client
     
     def create_index(self, vector_dimensions: int = 3072):
         """

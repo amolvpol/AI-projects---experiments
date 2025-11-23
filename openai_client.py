@@ -17,28 +17,34 @@ class OpenAIService:
     
     def __init__(self):
         """Initialize the OpenAI Service."""
-        # Azure OpenAI client setup
-        if settings.azure_openai_api_key:
-            logger.info("Using API key authentication for Azure OpenAI")
-            self.client = AzureOpenAI(
-                api_key=settings.azure_openai_api_key,
-                api_version=settings.azure_openai_api_version,
-                azure_endpoint=settings.azure_openai_endpoint
-            )
-        else:
-            logger.info("Using DefaultAzureCredential for Azure OpenAI")
-            # Get token from DefaultAzureCredential
-            credential = DefaultAzureCredential()
-            token_provider = credential.get_token("https://cognitiveservices.azure.com/.default")
-            
-            self.client = AzureOpenAI(
-                api_version=settings.azure_openai_api_version,
-                azure_endpoint=settings.azure_openai_endpoint,
-                azure_ad_token=token_provider.token
-            )
-        
         self.embedding_deployment = settings.azure_openai_embedding_deployment
         self.chat_deployment = settings.azure_openai_chat_deployment
+        self._client = None
+    
+    @property
+    def client(self):
+        """Lazy initialization of Azure OpenAI client."""
+        if self._client is None:
+            # Azure OpenAI client setup
+            if settings.azure_openai_api_key:
+                logger.info("Using API key authentication for Azure OpenAI")
+                self._client = AzureOpenAI(
+                    api_key=settings.azure_openai_api_key,
+                    api_version=settings.azure_openai_api_version,
+                    azure_endpoint=settings.azure_openai_endpoint
+                )
+            else:
+                logger.info("Using DefaultAzureCredential for Azure OpenAI")
+                # Get token from DefaultAzureCredential
+                credential = DefaultAzureCredential()
+                token_provider = credential.get_token("https://cognitiveservices.azure.com/.default")
+                
+                self._client = AzureOpenAI(
+                    api_version=settings.azure_openai_api_version,
+                    azure_endpoint=settings.azure_openai_endpoint,
+                    azure_ad_token=token_provider.token
+                )
+        return self._client
     
     def get_embedding(self, text: str) -> List[float]:
         """
